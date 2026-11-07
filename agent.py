@@ -84,6 +84,11 @@ class Agent:
             role: {player: 0 for player in players}
             for role, players in self._role_players.items()
         }
+        # A broadcast says which uncontested zone its sender is currently holding.
+        # It fills the visibility gap between teammates stationed at separate zones.
+        self._zone_reports: dict[str, tuple[int, int]] = {}
+        self._own_held_zone: int | None = None
+        self._zone_count = len(zone.zones(observation))
         self._own_type = me.unit_type(observation)
         self._last_observed_round = observation["observation"]["round"]
 
@@ -91,13 +96,25 @@ class Agent:
         """Plan role-specific movement, then select a learned target for its endpoint."""
         self._last_observed_round = observation["observation"]["round"]
         self._record_visible_allies(observation)
-        unit_type = me.unit_type(observation)
-        if unit_type == "archer":
-            role_order = self._archer_order(observation)
-        elif unit_type == "cavalry":
-            role_order = self._cavalry_order(observation)
+        held_zones = self._held_zone_indices(observation)
+        self._own_held_zone = self._zone_index_at(observation, me.position(observation))
+        if self._own_held_zone not in held_zones:
+            self._own_held_zone = None
+
+        if zone.zones(observation) and len(held_zones) < 2:
+            # Retake territory by removing the nearby enemy that prevents a zone
+            # from becoming uncontested. If none are visible, claim the nearest zone.
+            role_order = self._attack_order(observation)
+        elif zone.zones(observation):
+            role_order = self._defend_order(observation, held_zones)
         else:
-            role_order = self._footman_order(observation)
+            unit_type = me.unit_type(observation)
+            if unit_type == "archer":
+                role_order = self._archer_order(observation)
+            elif unit_type == "cavalry":
+                role_order = self._cavalry_order(observation)
+            else:
+                role_order = self._footman_order(observation)
 
         # The old role code supplies a sensible preferred target, but the policy
         # sees the exact selected endpoint and can make the finer attack choice.
@@ -106,6 +123,66 @@ class Agent:
         except (RuntimeError, ValueError):
             # Keep a valid strategic order if model inference is ever unavailable.
             return role_order
+
+    def _attack_order(self, observation: SkirmishObservation) -> SkirmishAction:
+        """Attack the nearest visible enemy while fewer than two zones are held."""
+        enemies = visible.enemies(observation)
+        here = me.position(observation)
+        if enemies:
+            target = min(
+                enemies,
+                key=lambda enemy: (tile.distance(here, enemy["position"]), enemy["hit_points"]),
+            )
+            return self._move_toward(observation, target["position"], target["unit_id"])
+        return self._move_toward(observation, self._capture_goal(observation))
+
+    def _defend_order(
+        self, observation: SkirmishObservation, held_zones: set[int]
+    ) -> SkirmishAction:
+        """Stay in a held zone, or travel to the nearest of the two to defend it."""
+        here = me.position(observation)
+        own_zone = self._zone_index_at(observation, here)
+        enemies = visible.enemies(observation)
+        target_id = (
+            min(enemies, key=lambda enemy: tile.distance(here, enemy["position"]))["unit_id"]
+            if enemies
+            else None
+        )
+        if own_zone in held_zones:
+            return action.stay(target_id, observation) if target_id else action.stay()
+
+        # Work with the two nearest zones the team currently holds. This prevents
+        # a third, incidental zone from pulling defenders away from the objective.
+        defended = sorted(
+            held_zones,
+            key=lambda index: tile.distance(here, zone.zones(observation)[index]["center"]),
+        )[:2]
+        goal = zone.zones(observation)[defended[0]]["center"]
+        return self._move_toward(observation, goal, target_id)
+
+    def _held_zone_indices(self, observation: SkirmishObservation) -> set[int]:
+        """Return visibly uncontested allied zones plus current teammate reports."""
+        own_side = me.side(observation)
+        held = {
+            index
+            for index, area in enumerate(zone.zones(observation))
+            if any(unit["side"] == own_side for unit in zone.occupants(observation, area))
+            and not any(unit["side"] != own_side for unit in zone.occupants(observation, area))
+        }
+        current_round = observation["observation"]["round"]
+        held.update(
+            zone_index
+            for reported_round, zone_index in self._zone_reports.values()
+            if reported_round >= current_round - 1
+        )
+        return held
+
+    @staticmethod
+    def _zone_index_at(observation: SkirmishObservation, position: AxialPosition) -> int | None:
+        current = zone.at(observation, position)
+        if current is None:
+            return None
+        return next(index for index, area in enumerate(zone.zones(observation)) if area == current)
 
     @torch.inference_mode()
     def _target_for_path(self, observation: SkirmishObservation, path_id: int) -> int:
@@ -329,11 +406,24 @@ class Agent:
             if role not in self._last_heartbeat or not isinstance(text, str):
                 continue
             parts = text.split(":")
-            if len(parts) != 3 or parts[:2] != ["crane-status", role]:
+            if len(parts) not in (3, 4) or parts[:2] != ["crane-status", role]:
                 continue
             try:
                 reported_round = int(parts[2])
             except ValueError:
                 continue
             self._last_heartbeat[role][sender] = max(self._last_heartbeat[role][sender], reported_round)
-        return [{"to": None, "text": f"crane-status:{self._own_type}:{self._last_observed_round}"}]
+            if len(parts) == 4 and parts[3] != "-":
+                try:
+                    zone_index = int(parts[3])
+                except ValueError:
+                    continue
+                if 0 <= zone_index < self._zone_count:
+                    self._zone_reports[sender] = (reported_round, zone_index)
+        zone_index = "-" if self._own_held_zone is None else str(self._own_held_zone)
+        return [
+            {
+                "to": None,
+                "text": f"crane-status:{self._own_type}:{self._last_observed_round}:{zone_index}",
+            }
+        ]
