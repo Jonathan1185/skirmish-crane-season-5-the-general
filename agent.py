@@ -124,7 +124,9 @@ class Agent:
         return targets[int(scores[0].argmax())]
 
     def _archer_order(self, observation: SkirmishObservation) -> SkirmishAction:
-        if self._all_role_lost("cavalry", observation) and self._all_role_lost("footman", observation):
+        # Capture and hold the closest scoring zone whenever zones are active.
+        # The combat logic below remains the fallback for zone-free presets.
+        if zone.zones(observation):
             return self._capture_order(observation)
 
         enemies = visible.enemies(observation)
@@ -164,7 +166,8 @@ class Agent:
         return self._move_toward(observation, self._capture_goal(observation), target_id)
 
     def _footman_order(self, observation: SkirmishObservation) -> SkirmishAction:
-        if self._all_role_lost("cavalry", observation):
+        # Capture and hold the closest scoring zone whenever zones are active.
+        if zone.zones(observation):
             return self._capture_order(observation)
 
         archers = [ally for ally in visible.allies(observation) if ally["type"] == "archer"]
@@ -218,8 +221,14 @@ class Agent:
 
     @staticmethod
     def _capture_goal(observation: SkirmishObservation) -> AxialPosition:
+        """Return the capture-zone center nearest to this unit, if one exists."""
         areas = zone.zones(observation)
-        return areas[0]["center"] if areas else tile.at_center(observation)
+        here = me.position(observation)
+        return (
+            min(areas, key=lambda area: tile.distance(here, area["center"]))["center"]
+            if areas
+            else tile.at_center(observation)
+        )
 
     def _record_visible_allies(self, observation: SkirmishObservation) -> None:
         current_round = observation["observation"]["round"]

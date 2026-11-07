@@ -136,3 +136,9 @@ Each exercise asks one design question. You can make the change yourself or desc
 ## Submitting
 
 The learner submits like any other agent: follow the shared [submitting guide](https://vox-deorum.github.io/game-sandbox/students/submitting/). The course server provides its own copy of PyTorch, and `imitation-policy.pt` counts toward the season's size limit, so keep the model small. The server never runs the scripts in `imitation/`.
+
+##Design Goal: My design goal was to make the archer smarter by helping it try to get away from the enemy and make it go close to the footmen. In addition to this the calvalry go into the capture area and once they perish the footmen go then the archers. Additionally I tried making the footmen more focused on protecting the archer while the calvary is still alive.Additionally, the different npcs should try to capture the closest capture zone.
+
+##Short Reflection: I also wanted the capture area to play a major part of it so I made the calvary job to capture it then the footmen then the archers. Additionally the different roles try to capture a different capture zone.
+
+#AI Disclosure and reflection: I used a AI agent (Codex) for my agent to help with the unit behavior and agent navigation.
