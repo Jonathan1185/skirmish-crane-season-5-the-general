@@ -163,11 +163,16 @@ class Agent:
     def _held_zone_indices(self, observation: SkirmishObservation) -> set[int]:
         """Return visibly uncontested allied zones plus current teammate reports."""
         own_side = me.side(observation)
+        occupants = [zone.occupants(observation, area) for area in zone.zones(observation)]
+        contested = {
+            index
+            for index, units_in_zone in enumerate(occupants)
+            if any(unit["side"] != own_side for unit in units_in_zone)
+        }
         held = {
             index
-            for index, area in enumerate(zone.zones(observation))
-            if any(unit["side"] == own_side for unit in zone.occupants(observation, area))
-            and not any(unit["side"] != own_side for unit in zone.occupants(observation, area))
+            for index, units_in_zone in enumerate(occupants)
+            if any(unit["side"] == own_side for unit in units_in_zone) and index not in contested
         }
         current_round = observation["observation"]["round"]
         held.update(
@@ -175,6 +180,8 @@ class Agent:
             for reported_round, zone_index in self._zone_reports.values()
             if reported_round >= current_round - 1
         )
+        # Direct battlefield information outranks a delayed teammate report.
+        held.difference_update(contested)
         return held
 
     @staticmethod
@@ -403,7 +410,7 @@ class Agent:
         for message in inbox:
             sender, text = message.get("from"), message.get("text")
             role = self._ally_roles.get(sender)
-            if role not in self._last_heartbeat or not isinstance(text, str):
+            if role is None or not isinstance(text, str):
                 continue
             parts = text.split(":")
             if len(parts) not in (3, 4) or parts[:2] != ["crane-status", role]:
@@ -412,7 +419,10 @@ class Agent:
                 reported_round = int(parts[2])
             except ValueError:
                 continue
-            self._last_heartbeat[role][sender] = max(self._last_heartbeat[role][sender], reported_round)
+            if role in self._last_heartbeat:
+                self._last_heartbeat[role][sender] = max(
+                    self._last_heartbeat[role][sender], reported_round
+                )
             if len(parts) == 4 and parts[3] != "-":
                 try:
                     zone_index = int(parts[3])
@@ -420,6 +430,8 @@ class Agent:
                     continue
                 if 0 <= zone_index < self._zone_count:
                     self._zone_reports[sender] = (reported_round, zone_index)
+            elif len(parts) == 4:
+                self._zone_reports.pop(sender, None)
         zone_index = "-" if self._own_held_zone is None else str(self._own_held_zone)
         return [
             {
